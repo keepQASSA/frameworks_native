@@ -70,11 +70,6 @@ TextOutput& alog(gLogTextOutput);
 TextOutput& aout(gStdoutTextOutput);
 TextOutput& aerr(gStderrTextOutput);
 
-// ------------ ProcessState.cpp
-
-Mutex& gProcessMutex = *new Mutex;
-sp<ProcessState> gProcess;
-
 // ------------ IServiceManager.cpp
 
 Mutex gDefaultServiceManagerLock;
