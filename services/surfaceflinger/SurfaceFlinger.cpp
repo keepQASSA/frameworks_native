@@ -417,6 +417,13 @@ void SurfaceFlinger::onFirstRef()
 
 SurfaceFlinger::~SurfaceFlinger() = default;
 
+void SurfaceFlinger::setTranslate(int x, int y, const DisplayDeviceState& state){
+    for (const auto& [token, displayDevice] : mDisplays) {
+        displayDevice->setTranslate(x, y);
+        displayDevice->setProjection(state.orientation, state.viewport, state.frame);
+    }
+}
+
 void SurfaceFlinger::binderDied(const wp<IBinder>& /* who */)
 {
     // the window manager died on us. prepare its eulogy.
@@ -3411,6 +3418,7 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<DisplayDevice>& displayDevice,
     const Region bounds(displayState.bounds);
     const DisplayRenderArea renderArea(displayDevice);
     const bool hasClientComposition = getHwComposer().hasClientComposition(displayId);
+    const bool hasFlipClientTargetRequest = getHwComposer().hasFlipClientTargetRequest(displayId);
     ATRACE_INT("hasClientComposition", hasClientComposition);
 
     bool applyColorMatrix = false;
@@ -3475,6 +3483,15 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<DisplayDevice>& displayDevice,
         applyColorMatrix = !hasDeviceComposition && !skipClientColorTransform;
         if (applyColorMatrix) {
             clientCompositionDisplay.colorTransform = displayState.colorTransformMat;
+        }
+    } else if (hasFlipClientTargetRequest) {
+        buf = display->getRenderSurface()->dequeueBuffer(&fd);
+
+        if (buf == nullptr) {
+            ALOGW("Dequeuing buffer for display [%s] failed, bailing out of "
+                  "client composition for this frame",
+                  displayDevice->getDisplayName().c_str());
+            return false;
         }
     }
 
@@ -5280,9 +5297,9 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         code == IBinder::SYSPROPS_TRANSACTION) {
         return OK;
     }
-    // Numbers from 1000 to 1034 are currently used for backdoors. The code
+    // Numbers from 1000 to 1035 and 2020 are currently used for backdoors. The code
     // in onTransact verifies that the user is root, and has access to use SF.
-    if (code >= 1000 && code <= 1035) {
+    if ((code >= 1000 && code <= 1035) || (code == 2020)) {
         ALOGV("Accessing SurfaceFlinger through backdoor code: %u", code);
         return OK;
     }
@@ -5625,6 +5642,20 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
                         return result;
                     }
                     mDebugDisplayConfigSetByBackdoor = true;
+                }
+                return NO_ERROR;
+            }
+            case 2020: {
+                int x = data.readInt32();
+                int y = data.readInt32();
+                ssize_t index = mCurrentState.displays.indexOfKey(getInternalDisplayTokenLocked());
+                if (index < 0) {
+                    ALOGE("ScreenStabilization: Invalid token %p", getInternalDisplayTokenLocked().get());
+                } else {
+                    const DisplayDeviceState& state = mCurrentState.displays.valueAt(index);
+                    setTranslate(x, y, state);
+                    invalidateHwcGeometry();
+                    repaintEverything();
                 }
                 return NO_ERROR;
             }

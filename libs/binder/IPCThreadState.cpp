@@ -462,7 +462,7 @@ void IPCThreadState::clearCaller()
 
 void IPCThreadState::flushCommands()
 {
-    if (mProcess->mDriverFD <= 0)
+    if (mProcess->mDriverFD < 0)
         return;
     talkWithDriver(false);
     // The flush could have caused post-write refcount decrements to have
@@ -474,6 +474,19 @@ void IPCThreadState::flushCommands()
     if (mOut.dataSize() > 0) {
         ALOGW("mOut.dataSize() > 0 after flushCommands()");
     }
+}
+
+bool IPCThreadState::flushIfNeeded()
+{
+    if (mIsLooper || isServingCall()) {
+        return false;
+    }
+    // In case this thread is not a looper and is not currently serving a binder transaction,
+    // there's no guarantee that this thread will call back into the kernel driver any time
+    // soon. Therefore, flush pending commands such as BC_FREE_BUFFER, to prevent them from getting
+    // stuck in this thread's out buffer.
+    flushCommands();
+    return true;
 }
 
 void IPCThreadState::blockUntilThreadAvailable()
@@ -587,6 +600,7 @@ void IPCThreadState::joinThreadPool(bool isMain)
 
     mOut.writeInt32(isMain ? BC_ENTER_LOOPER : BC_REGISTER_LOOPER);
 
+    mIsLooper = true;
     status_t result;
     do {
         processPendingDerefs();
@@ -610,12 +624,13 @@ void IPCThreadState::joinThreadPool(bool isMain)
         (void*)pthread_self(), getpid(), result);
 
     mOut.writeInt32(BC_EXIT_LOOPER);
+    mIsLooper = false;
     talkWithDriver(false);
 }
 
 int IPCThreadState::setupPolling(int* fd)
 {
-    if (mProcess->mDriverFD <= 0) {
+    if (mProcess->mDriverFD < 0) {
         return -EBADF;
     }
 
@@ -722,9 +737,11 @@ void IPCThreadState::incStrongHandle(int32_t handle, BpBinder *proxy)
     LOG_REMOTEREFS("IPCThreadState::incStrongHandle(%d)\n", handle);
     mOut.writeInt32(BC_ACQUIRE);
     mOut.writeInt32(handle);
-    // Create a temp reference until the driver has handled this command.
-    proxy->incStrong(mProcess.get());
-    mPostWriteStrongDerefs.push(proxy);
+    if (!flushIfNeeded()) {
+        // Create a temp reference until the driver has handled this command.
+        proxy->incStrong(mProcess.get());
+        mPostWriteStrongDerefs.push(proxy);
+    }
 }
 
 void IPCThreadState::decStrongHandle(int32_t handle)
@@ -732,6 +749,7 @@ void IPCThreadState::decStrongHandle(int32_t handle)
     LOG_REMOTEREFS("IPCThreadState::decStrongHandle(%d)\n", handle);
     mOut.writeInt32(BC_RELEASE);
     mOut.writeInt32(handle);
+    flushIfNeeded();
 }
 
 void IPCThreadState::incWeakHandle(int32_t handle, BpBinder *proxy)
@@ -739,9 +757,11 @@ void IPCThreadState::incWeakHandle(int32_t handle, BpBinder *proxy)
     LOG_REMOTEREFS("IPCThreadState::incWeakHandle(%d)\n", handle);
     mOut.writeInt32(BC_INCREFS);
     mOut.writeInt32(handle);
-    // Create a temp reference until the driver has handled this command.
-    proxy->getWeakRefs()->incWeak(mProcess.get());
-    mPostWriteWeakDerefs.push(proxy->getWeakRefs());
+    if (!flushIfNeeded()) {
+        // Create a temp reference until the driver has handled this command.
+        proxy->getWeakRefs()->incWeak(mProcess.get());
+        mPostWriteWeakDerefs.push(proxy->getWeakRefs());
+    }
 }
 
 void IPCThreadState::decWeakHandle(int32_t handle)
@@ -749,6 +769,7 @@ void IPCThreadState::decWeakHandle(int32_t handle)
     LOG_REMOTEREFS("IPCThreadState::decWeakHandle(%d)\n", handle);
     mOut.writeInt32(BC_DECREFS);
     mOut.writeInt32(handle);
+    flushIfNeeded();
 }
 
 status_t IPCThreadState::attemptIncStrongHandle(int32_t handle)
@@ -803,6 +824,7 @@ IPCThreadState::IPCThreadState()
     : mProcess(ProcessState::self()),
       mWorkSource(kUnsetWorkSource),
       mPropagateWorkSource(false),
+      mIsLooper(false),
       mStrictModePolicy(0),
       mLastTransactionBinderFlags(0),
       mCallRestriction(mProcess->mCallRestriction)
@@ -921,7 +943,7 @@ finish:
 
 status_t IPCThreadState::talkWithDriver(bool doReceive)
 {
-    if (mProcess->mDriverFD <= 0) {
+    if (mProcess->mDriverFD < 0) {
         return -EBADF;
     }
 
@@ -979,7 +1001,7 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
 #else
         err = INVALID_OPERATION;
 #endif
-        if (mProcess->mDriverFD <= 0) {
+        if (mProcess->mDriverFD < 0) {
             err = -EBADF;
         }
         IF_LOG_COMMANDS() {
@@ -1298,7 +1320,7 @@ void IPCThreadState::threadDestructor(void *st)
         if (self) {
                 self->flushCommands();
 #if defined(__ANDROID__)
-        if (self->mProcess->mDriverFD > 0) {
+        if (self->mProcess->mDriverFD >= 0) {
             ioctl(self->mProcess->mDriverFD, BINDER_THREAD_EXIT, 0);
         }
 #endif
@@ -1321,6 +1343,7 @@ void IPCThreadState::freeBuffer(Parcel* parcel, const uint8_t* data,
     IPCThreadState* state = self();
     state->mOut.writeInt32(BC_FREE_BUFFER);
     state->mOut.writePointer((uintptr_t)data);
+    state->flushIfNeeded();
 }
 
 }; // namespace android
