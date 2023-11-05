@@ -1159,7 +1159,6 @@ private:
     bool mCheckPendingFence = false;
 
     bool mLumaSampling = true;
-    bool mForceLightBrightness = false;
     sp<RegionSamplingThread> mRegionSamplingThread;
     ui::DisplayPrimaries mInternalDisplayPrimaries;
 
